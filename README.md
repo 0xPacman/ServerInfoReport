@@ -2,4 +2,4 @@
 
 ## - Usage:
 
-`bash -c "$(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/refs/heads/main/InfoRaport.sh)"`
+`bash -c "$(curl -fsSL https://is.gd/swKQZM)"`
