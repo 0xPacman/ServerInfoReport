@@ -915,6 +915,84 @@ check_docker_containers() {
     fi
 }
 
+check_security_status() {
+    local os=$(get_os)
+    echo -e "${BLUE}${BOLD}🔒 Security Status:${NC}"
+    
+    # Check for failed login attempts
+    if [ "$os" == "Linux" ]; then
+        if command -v journalctl &>/dev/null; then
+            local failed_logins=$(journalctl -u ssh --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || echo "0")
+            if [ "$failed_logins" -gt 10 ]; then
+                echo -e "${RED}⚠️  High number of failed SSH login attempts: $failed_logins${NC}"
+                ((TOTAL_WARNINGS++))
+            else
+                echo -e "${GREEN}✓ SSH login attempts normal: $failed_logins${NC}"
+            fi
+        fi
+        
+        # Check for root login attempts
+        local root_attempts=$(last root 2>/dev/null | wc -l)
+        if [ "$root_attempts" -gt 0 ]; then
+            echo -e "${YELLOW}⚠️  Recent root login attempts detected${NC}"
+        fi
+        
+        # Check open ports
+        if command -v ss &>/dev/null; then
+            local open_ports=$(ss -tuln | grep LISTEN | wc -l)
+            echo -e "${CYAN}Open listening ports: $open_ports${NC}"
+        elif command -v netstat &>/dev/null; then
+            local open_ports=$(netstat -tuln | grep LISTEN | wc -l)
+            echo -e "${CYAN}Open listening ports: $open_ports${NC}"
+        fi
+    fi
+}
+
+check_system_updates() {
+    local os=$(get_os)
+    echo -e "${BLUE}${BOLD}📦 System Updates:${NC}"
+    
+    if [ "$os" == "Linux" ]; then
+        if command -v apt &>/dev/null; then
+            echo -e "${BLUE}${BOLD}Package Updates (APT):${NC}"
+            local updates=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "0")
+            if [ "$updates" -gt 1 ]; then
+                echo -e "${YELLOW}Available updates: $((updates - 1))${NC}"
+            else
+                echo -e "${GREEN}System is up to date${NC}"
+            fi
+        elif command -v yum &>/dev/null; then
+            echo -e "${BLUE}${BOLD}Package Updates (YUM):${NC}"
+            local updates=$(yum check-update 2>/dev/null | grep -c "^[a-zA-Z]" || echo "0")
+            if [ "$updates" -gt 0 ]; then
+                echo -e "${YELLOW}Available updates: $updates${NC}"
+            else
+                echo -e "${GREEN}System is up to date${NC}"
+            fi
+        elif command -v dnf &>/dev/null; then
+            echo -e "${BLUE}${BOLD}Package Updates (DNF):${NC}"
+            local updates=$(dnf check-update 2>/dev/null | grep -c "^[a-zA-Z]" || echo "0")
+            if [ "$updates" -gt 0 ]; then
+                echo -e "${YELLOW}Available updates: $updates${NC}"
+            else
+                echo -e "${GREEN}System is up to date${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Package manager not found${NC}"
+        fi
+    elif [ "$os" == "Mac" ]; then
+        echo -e "${BLUE}${BOLD}Software Updates (macOS):${NC}"
+        if command -v softwareupdate &>/dev/null; then
+            local updates=$(softwareupdate -l 2>/dev/null | grep -c "recommended" || echo "0")
+            if [ "$updates" -gt 0 ]; then
+                echo -e "${YELLOW}Available updates: $updates${NC}"
+            else
+                echo -e "${GREEN}System is up to date${NC}"
+            fi
+        fi
+    fi
+}
+
 generate_json_report() {
     local output_file="$1"
     local cpu_usage=$(parse_cpu_percentage "$(get_cpu_usage)")
