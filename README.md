@@ -14,13 +14,16 @@ A comprehensive, feature-rich bash script for monitoring and reporting server he
 
 ### Advanced Features
 - **Alert System**: Configurable thresholds for CPU, memory, and disk usage
-- **Security Analysis**: Failed login attempts, open ports, security status
+- **Security Analysis**: Port scanning, file permissions, SSH configuration analysis
+- **Performance Benchmarks**: CPU, memory, disk I/O, and network performance tests
+- **Health Checker**: System health scoring with actionable recommendations
 - **Process Information**: Top CPU and memory consuming processes
 - **System Updates**: Check for available package updates
 - **Continuous Monitoring**: Real-time monitoring mode with auto-refresh
-- **Multiple Export Formats**: TXT, JSON output formats
+- **Multiple Export Formats**: TXT, JSON, HTML output formats
+- **Email Notifications**: SMTP-based alerts with HTML reports
 - **Detailed Logging**: Comprehensive logging with timestamps
-- **Command Line Interface**: Rich CLI with multiple options
+- **Command Line Interface**: Rich CLI with 15+ options
 
 ### Performance & Reliability
 - **Cross-platform**: Linux and macOS support
@@ -60,14 +63,29 @@ A comprehensive, feature-rich bash script for monitoring and reporting server he
 # Export to JSON format
 ./InfoRaport.sh --detailed --output report.json --format json
 
+# Export to HTML format
+./InfoRaport.sh --detailed --output report.html --format html
+
 # Custom alert thresholds
 ./InfoRaport.sh --cpu-threshold 90 --mem-threshold 80 --disk-threshold 95
+
+# Security analysis
+./InfoRaport.sh --security-scan --detailed
+
+# Performance benchmarks
+./InfoRaport.sh --performance-test --detailed
+
+# System health check with recommendations
+./InfoRaport.sh --health-check --recommendations
 
 # Continuous monitoring mode
 ./InfoRaport.sh --monitor
 
 # Generate report without display (for automation)
 ./InfoRaport.sh --report-only --output status.json --format json
+
+# Test email notifications
+./InfoRaport.sh --email-test
 ```
 
 ### Daemon Mode
@@ -112,14 +130,21 @@ export_dir=./reports
 | `-d, --detailed` | Enable detailed mode |
 | `-q, --quiet` | Run in quiet mode |
 | `-o, --output FILE` | Export report to file |
-| `-f, --format FORMAT` | Export format (txt, json) |
+| `-f, --format FORMAT` | Export format (txt, json, html) |
+| `-c, --config FILE` | Use custom configuration file |
 | `--no-log` | Disable logging |
 | `--no-alerts` | Disable alert checking |
 | `--cpu-threshold N` | Set CPU alert threshold |
 | `--mem-threshold N` | Set memory alert threshold |
 | `--disk-threshold N` | Set disk alert threshold |
+| `--check-services` | Check additional services |
 | `--monitor` | Continuous monitoring mode |
 | `--report-only` | Generate report without display |
+| `--security-scan` | Run comprehensive security scan |
+| `--performance-test` | Run performance benchmarks |
+| `--health-check` | Run system health check |
+| `--email-test` | Test email notification configuration |
+| `--recommendations` | Show system optimization recommendations |
 
 ## 📈 Example Outputs
 
@@ -182,15 +207,41 @@ Filesystem      Size  Used Avail Use% Mounted on
 ## 🔧 Installation
 
 ### One-liner Installation
+
+#### Basic Installation
 ```bash
-bash -c "$(curl -fsSL https://is.gd/swKQZM)"
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/install.sh)
+```
+
+#### Install and Run with Arguments
+```bash
+# Install and run detailed report
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/install.sh) --run --options "--detailed"
+
+# Install and run security scan
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/install.sh) --run --options "--security-scan --detailed"
+
+# Install and run performance test
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/install.sh) --run --options "--performance-test"
+
+# Install to custom directory
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/install.sh) --dir /opt/ServerInfoReport
+```
+
+#### Installation Script Options
+```bash
+--dir DIR          # Install directory (default: ~/ServerInfoReport)
+--run              # Run the script after installation
+--options "OPTS"   # Options to pass when running (requires --run)
+--branch BRANCH    # Git branch to install (default: main)
+--help, -h         # Show help message
 ```
 
 ### Manual Installation
 ```bash
-git clone <repository-url>
+git clone https://github.com/0xPacman/ServerInfoReport.git
 cd ServerInfoReport
-chmod +x InfoRaport.sh monitor_daemon.sh
+chmod +x *.sh
 ./InfoRaport.sh --help
 ```
 
@@ -259,9 +310,26 @@ MIT License - see LICENSE file for details
 
 ## 🔮 Roadmap
 
-- [ ] HTML report generation
-- [ ] Email alerting
-- [ ] Database integration
-- [ ] Web dashboard
-- [ ] Custom plugin system
+### Completed ✅
+- [x] HTML report generation with charts and responsive design
+- [x] Email alerting with SMTP support
+- [x] Security scanning (port scans, file permissions, SSH analysis)
+- [x] Performance benchmarking (CPU, memory, disk I/O, network)
+- [x] Health checking with scoring system
+- [x] Modular architecture with separate specialized modules
+- [x] Daemon monitoring with background service controls
+- [x] Enhanced CLI with 15+ options
+
+### In Progress 🚧
+- [ ] Web dashboard with real-time monitoring
+- [ ] Database integration for historical data storage
 - [ ] Remote monitoring capabilities
+
+### Planned 📋
+- [ ] Custom plugin system for extensibility
+- [ ] Mobile-responsive web interface
+- [ ] Automated remediation actions
+- [ ] Integration with popular monitoring platforms
+- [ ] Docker containerization
+- [ ] Kubernetes monitoring support
+- [ ] Cloud provider integrations (AWS, Azure, GCP)
