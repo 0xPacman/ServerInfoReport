@@ -83,7 +83,25 @@ check_threshold() {
     local threshold="$2"
     local metric="$3"
     
-    if (( $(echo "$value > $threshold" | bc -l 2>/dev/null || echo "0") )); then
+    # Check if value is empty or not a number
+    if [ -z "$value" ] || [ "$value" = "" ]; then
+        return 0
+    fi
+    
+    # Use bc for comparison if available, otherwise use basic arithmetic
+    local is_above_threshold=0
+    if command -v bc &>/dev/null; then
+        is_above_threshold=$(echo "$value > $threshold" | bc -l 2>/dev/null || echo "0")
+    else
+        # Fallback to integer comparison
+        local value_int=${value%.*}
+        local threshold_int=${threshold%.*}
+        if [ -n "$value_int" ] && [ -n "$threshold_int" ] && [ "$value_int" -gt "$threshold_int" ]; then
+            is_above_threshold=1
+        fi
+    fi
+    
+    if [ "$is_above_threshold" -eq 1 ]; then
         ((TOTAL_WARNINGS++))
         log_message "WARNING: $metric is above threshold ($value% > $threshold%)" "WARN"
         return 1
@@ -111,20 +129,36 @@ draw_line() {
 get_cpu_usage() {
     local os=$(get_os)
     if [ "$os" == "Linux" ]; then
-        top -bn1 | grep "Cpu(s)" | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9.]+%/) print $i}' | head -1 | sed 's/%//'
+        # Multiple methods to get CPU usage
+        if command -v top &>/dev/null; then
+            local cpu_output=$(top -bn1 | grep "Cpu(s)" | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9.]+%/) print $i}' | head -1 | sed 's/%//')
+            if [ -n "$cpu_output" ] && [ "$cpu_output" != "" ]; then
+                echo "$cpu_output"
+            else
+                echo "0.0"
+            fi
+        elif [ -f /proc/stat ]; then
+            # Calculate CPU usage from /proc/stat
+            local cpu_line=$(head -1 /proc/stat)
+            local cpu_sum=$(echo "$cpu_line" | awk '{sum=$2+$3+$4+$5+$6+$7+$8; printf "%.1f", (sum-$5)*100/sum}')
+            echo "$cpu_sum"
+        else
+            echo "0.0"
+        fi
     elif [ "$os" == "Mac" ]; then
-        top -l 1 | grep "CPU usage" | awk '{print $3}' | sed 's/%//'
+        local mac_cpu=$(top -l 1 | grep "CPU usage" | awk '{print $3}' | sed 's/%//' 2>/dev/null)
+        echo "${mac_cpu:-0.0}"
     else
-        echo "0"
+        echo "0.0"
     fi
 }
 
 get_cpu_count() {
     local os=$(get_os)
     if [ "$os" == "Linux" ]; then
-        nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
+        nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"
     elif [ "$os" == "Mac" ]; then
-        sysctl -n hw.ncpu 2>/dev/null
+        sysctl -n hw.ncpu 2>/dev/null || echo "1"
     else
         echo "1"
     fi
@@ -133,33 +167,54 @@ get_cpu_count() {
 get_memory_usage() {
     local os=$(get_os)
     if [ "$os" == "Linux" ]; then
-        free -m | awk 'NR==2 {printf "Total: %s MB | Used: %s MB | Free: %s MB | Available: %s MB", $2,$3,$4,$7}'
+        if command -v free &>/dev/null; then
+            free -m | awk 'NR==2 {printf "Total: %s MB | Used: %s MB | Free: %s MB | Available: %s MB", $2,$3,$4,$7}'
+        elif [ -f /proc/meminfo ]; then
+            local total=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+            local available=$(grep MemAvailable /proc/meminfo | awk '{print int($2/1024)}' 2>/dev/null || echo "0")
+            local used=$((total - available))
+            echo "Total: ${total} MB | Used: ${used} MB | Available: ${available} MB"
+        else
+            echo "Memory info not available"
+        fi
     elif [ "$os" == "Mac" ]; then
-        top -l 1 | grep "PhysMem" | sed 's/^[ \t]*//'
+        top -l 1 | grep "PhysMem" | sed 's/^[ \t]*//' 2>/dev/null || echo "Memory info not available"
     else
         echo "Memory info not available"
     fi
 }
 
 get_storage_usage() {
-    df -h / 2>/dev/null || echo "Storage info not available"
+    if command -v df &>/dev/null; then
+        df -h / 2>/dev/null
+    else
+        echo "Storage info not available"
+    fi
 }
 
 get_uptime_info() {
     local os=$(get_os)
-    if [ "$os" == "Linux" ]; then
-        uptime -p 2>/dev/null || uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}'
-    elif [ "$os" == "Mac" ]; then
-        uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}'
+    if command -v uptime &>/dev/null; then
+        if [ "$os" == "Linux" ]; then
+            uptime -p 2>/dev/null || uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}'
+        elif [ "$os" == "Mac" ]; then
+            uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}'
+        else
+            uptime
+        fi
     else
-        uptime
+        echo "Uptime info not available"
     fi
 }
 
 get_load_average() {
     local os=$(get_os)
-    if [ "$os" == "Linux" ] || [ "$os" == "Mac" ]; then
-        uptime | awk -F'load average: ' '{print $2}'
+    if command -v uptime &>/dev/null; then
+        if [ "$os" == "Linux" ] || [ "$os" == "Mac" ]; then
+            uptime | awk -F'load average: ' '{print $2}' 2>/dev/null || uptime | awk -F'load averages: ' '{print $2}' 2>/dev/null || echo "N/A"
+        else
+            echo "N/A"
+        fi
     else
         echo "N/A"
     fi
@@ -197,9 +252,11 @@ get_ip_info() {
     if [ "$os" == "Linux" ] || [ "$os" == "Mac" ]; then
         # Get primary IP address
         if command -v ip &>/dev/null; then
-            ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $7}'
+            ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $7}' | head -1
+        elif command -v ifconfig &>/dev/null; then
+            ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1 | sed 's/addr://'
         else
-            ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1
+            echo "N/A"
         fi
     else
         echo "N/A"
@@ -209,14 +266,27 @@ get_ip_info() {
 get_memory_percentage() {
     local os=$(get_os)
     if [ "$os" == "Linux" ]; then
-        free | awk 'NR==2{printf "%.1f", $3*100/$2}'
+        if command -v free &>/dev/null; then
+            free | awk 'NR==2{printf "%.1f", $3*100/$2}'
+        elif [ -f /proc/meminfo ]; then
+            local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+            local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}' 2>/dev/null || echo "0")
+            local used=$((total - available))
+            echo "scale=1; $used * 100 / $total" | bc -l 2>/dev/null || echo "0"
+        else
+            echo "0"
+        fi
     else
         echo "0"
     fi
 }
 
 get_disk_percentage() {
-    df / 2>/dev/null | awk 'NR==2{print $5}' | sed 's/%//' || echo "0"
+    if command -v df &>/dev/null; then
+        df / 2>/dev/null | awk 'NR==2{print $5}' | sed 's/%//' || echo "0"
+    else
+        echo "0"
+    fi
 }
 
 check_disk_health() {
@@ -241,10 +311,18 @@ check_disk_health() {
 
 get_process_info() {
     echo -e "${BLUE}${BOLD}Top 5 CPU-consuming processes:${NC}"
-    ps aux --sort=-%cpu 2>/dev/null | head -6 | tail -5 | awk '{printf "%-12s %-8s %-8s %s\n", $1, $2, $3"%", $11}' || echo "Process info not available"
+    if command -v ps &>/dev/null; then
+        ps aux --sort=-%cpu 2>/dev/null | head -6 | tail -5 | awk '{printf "%-12s %-8s %-8s %s\n", $1, $2, $3"%", $11}' || echo "Process info not available"
+    else
+        echo "Process info not available"
+    fi
     
     echo -e "\n${BLUE}${BOLD}Top 5 Memory-consuming processes:${NC}"
-    ps aux --sort=-%mem 2>/dev/null | head -6 | tail -5 | awk '{printf "%-12s %-8s %-8s %s\n", $1, $2, $4"%", $11}' || echo "Process info not available"
+    if command -v ps &>/dev/null; then
+        ps aux --sort=-%mem 2>/dev/null | head -6 | tail -5 | awk '{printf "%-12s %-8s %-8s %s\n", $1, $2, $4"%", $11}' || echo "Process info not available"
+    else
+        echo "Process info not available"
+    fi
 }
 
 check_service() {
@@ -252,14 +330,20 @@ check_service() {
     if command -v systemctl &>/dev/null; then
         if systemctl is-active --quiet "$service" 2>/dev/null; then
             echo -e "${GREEN}✓ $service is running${NC}"
-        elif systemctl list-unit-files | grep -q "^$service"; then
+        elif systemctl list-unit-files 2>/dev/null | grep -q "^$service"; then
             echo -e "${RED}✗ $service is not running${NC}"
             ((TOTAL_WARNINGS++))
         else
             echo -e "${YELLOW}? $service not found${NC}"
         fi
+    elif command -v service &>/dev/null; then
+        if service "$service" status &>/dev/null; then
+            echo -e "${GREEN}✓ $service is running${NC}"
+        else
+            echo -e "${RED}✗ $service status unknown${NC}"
+        fi
     else
-        echo -e "${YELLOW}systemctl not available${NC}"
+        echo -e "${YELLOW}systemctl/service not available${NC}"
     fi
 }
 
@@ -274,11 +358,13 @@ check_network_services() {
             echo -e "${YELLOW}⚠ SSH service not detected${NC}"
         fi
     elif command -v netstat &>/dev/null; then
-        if netstat -tuln | grep -q ":22 "; then
+        if netstat -tuln 2>/dev/null | grep -q ":22 "; then
             echo -e "${GREEN}✓ SSH service is listening${NC}"
         else
             echo -e "${YELLOW}⚠ SSH service not detected${NC}"
         fi
+    else
+        echo -e "${YELLOW}Network tools not available${NC}"
     fi
     
     # Check HTTP services
@@ -289,7 +375,7 @@ check_network_services() {
                 echo -e "${GREEN}✓ HTTP service on port $port${NC}"
             fi
         elif command -v netstat &>/dev/null; then
-            if netstat -tuln | grep -q ":$port "; then
+            if netstat -tuln 2>/dev/null | grep -q ":$port "; then
                 echo -e "${GREEN}✓ HTTP service on port $port${NC}"
             fi
         fi
@@ -316,30 +402,37 @@ check_security_status() {
     # Check for failed login attempts
     if [ "$os" == "Linux" ]; then
         if command -v journalctl &>/dev/null; then
-            local failed_logins=$(journalctl -u ssh --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || echo "0")
-            if [ "$failed_logins" -gt 10 ]; then
+            local failed_logins=$(journalctl -u ssh --since "24 hours ago" 2>/dev/null | grep -c "Failed password" 2>/dev/null || echo "0")
+            # Clean up the output - remove any newlines or extra characters
+            failed_logins=$(echo "$failed_logins" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$failed_logins" ] && [ "$failed_logins" -gt 10 ] 2>/dev/null; then
                 echo -e "${RED}⚠️  High number of failed SSH login attempts: $failed_logins${NC}"
                 ((TOTAL_WARNINGS++))
             else
-                echo -e "${GREEN}✓ SSH login attempts normal: $failed_logins${NC}"
+                echo -e "${GREEN}✓ SSH login attempts normal: ${failed_logins:-0}${NC}"
             fi
         fi
         
         # Check for root login attempts
         if command -v last &>/dev/null; then
-            local root_attempts=$(last root 2>/dev/null | grep -v "wtmp begins" | wc -l)
-            if [ "$root_attempts" -gt 0 ]; then
+            local root_attempts=$(last root 2>/dev/null | grep -v "wtmp begins" | wc -l 2>/dev/null || echo "0")
+            root_attempts=$(echo "$root_attempts" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$root_attempts" ] && [ "$root_attempts" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}⚠️  Recent root login attempts detected: $root_attempts${NC}"
+            else
+                echo -e "${GREEN}✓ No recent root logins${NC}"
             fi
         fi
         
         # Check open ports
         if command -v ss &>/dev/null; then
-            local open_ports=$(ss -tuln | grep LISTEN | wc -l)
-            echo -e "${CYAN}Open listening ports: $open_ports${NC}"
+            local open_ports=$(ss -tuln | grep LISTEN | wc -l 2>/dev/null || echo "0")
+            open_ports=$(echo "$open_ports" | tr -d '\n' | awk '{print $1}')
+            echo -e "${CYAN}Open listening ports: ${open_ports:-0}${NC}"
         elif command -v netstat &>/dev/null; then
-            local open_ports=$(netstat -tuln | grep LISTEN | wc -l)
-            echo -e "${CYAN}Open listening ports: $open_ports${NC}"
+            local open_ports=$(netstat -tuln 2>/dev/null | grep LISTEN | wc -l 2>/dev/null || echo "0")
+            open_ports=$(echo "$open_ports" | tr -d '\n' | awk '{print $1}')
+            echo -e "${CYAN}Open listening ports: ${open_ports:-0}${NC}"
         fi
     fi
 }
@@ -350,22 +443,26 @@ check_system_updates() {
     
     if [ "$os" == "Linux" ]; then
         if command -v apt &>/dev/null; then
-            local updates=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "0")
-            if [ "$updates" -gt 1 ]; then
+            local updates=$(apt list --upgradable 2>/dev/null | grep -c upgradable 2>/dev/null || echo "0")
+            # Clean up the output
+            updates=$(echo "$updates" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$updates" ] && [ "$updates" -gt 1 ] 2>/dev/null; then
                 echo -e "${YELLOW}Available updates: $((updates - 1))${NC}"
             else
                 echo -e "${GREEN}System is up to date${NC}"
             fi
         elif command -v yum &>/dev/null; then
-            local updates=$(yum check-update 2>/dev/null | grep -c "^[a-zA-Z]" || echo "0")
-            if [ "$updates" -gt 0 ]; then
+            local updates=$(yum check-update 2>/dev/null | grep -c "^[a-zA-Z]" 2>/dev/null || echo "0")
+            updates=$(echo "$updates" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$updates" ] && [ "$updates" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}Available updates: $updates${NC}"
             else
                 echo -e "${GREEN}System is up to date${NC}"
             fi
         elif command -v dnf &>/dev/null; then
-            local updates=$(dnf check-update 2>/dev/null | grep -c "^[a-zA-Z]" || echo "0")
-            if [ "$updates" -gt 0 ]; then
+            local updates=$(dnf check-update 2>/dev/null | grep -c "^[a-zA-Z]" 2>/dev/null || echo "0")
+            updates=$(echo "$updates" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$updates" ] && [ "$updates" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}Available updates: $updates${NC}"
             else
                 echo -e "${GREEN}System is up to date${NC}"
@@ -375,8 +472,9 @@ check_system_updates() {
         fi
     elif [ "$os" == "Mac" ]; then
         if command -v softwareupdate &>/dev/null; then
-            local updates=$(softwareupdate -l 2>/dev/null | grep -c "recommended" || echo "0")
-            if [ "$updates" -gt 0 ]; then
+            local updates=$(softwareupdate -l 2>/dev/null | grep -c "recommended" 2>/dev/null || echo "0")
+            updates=$(echo "$updates" | tr -d '\n' | awk '{print $1}')
+            if [ -n "$updates" ] && [ "$updates" -gt 0 ] 2>/dev/null; then
                 echo -e "${YELLOW}Available updates: $updates${NC}"
             else
                 echo -e "${GREEN}System is up to date${NC}"
@@ -409,11 +507,15 @@ run_security_scan() {
     
     # Check for suspicious processes
     echo -e "${BLUE}${BOLD}Process Analysis:${NC}"
-    local suspicious_processes=$(ps aux | grep -E "(nc|netcat|nmap|tcpdump)" | grep -v grep | wc -l)
-    if [ "$suspicious_processes" -gt 0 ]; then
-        echo -e "${YELLOW}⚠️  Potential network monitoring tools detected${NC}"
+    if command -v ps &>/dev/null; then
+        local suspicious_processes=$(ps aux | grep -E "(nc|netcat|nmap|tcpdump)" | grep -v grep | wc -l)
+        if [ "$suspicious_processes" -gt 0 ]; then
+            echo -e "${YELLOW}⚠️  Potential network monitoring tools detected${NC}"
+        else
+            echo -e "${GREEN}✓ No suspicious processes detected${NC}"
+        fi
     else
-        echo -e "${GREEN}✓ No suspicious processes detected${NC}"
+        echo -e "${YELLOW}Process analysis not available${NC}"
     fi
     echo
     
@@ -432,11 +534,24 @@ run_performance_test() {
     
     # CPU performance test
     echo -e "${BLUE}${BOLD}CPU Performance Test:${NC}"
-    local start_time=$(date +%s.%N)
-    echo "scale=5000; 4*a(1)" | bc -l > /dev/null 2>&1 || echo "Pi calculation completed"
-    local end_time=$(date +%s.%N)
-    local duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "N/A")
-    echo -e "${CYAN}Pi calculation time: ${duration}s${NC}"
+    local start_time=$(date +%s.%N 2>/dev/null || date +%s)
+    if command -v bc &>/dev/null; then
+        echo "scale=1000; 4*a(1)" | bc -l > /dev/null 2>&1 || echo "Pi calculation completed"
+    else
+        # Simple CPU test without bc
+        local i=0
+        while [ $i -lt 10000 ]; do
+            i=$((i + 1))
+        done
+    fi
+    local end_time=$(date +%s.%N 2>/dev/null || date +%s)
+    
+    if command -v bc &>/dev/null; then
+        local duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "N/A")
+        echo -e "${CYAN}CPU test duration: ${duration}s${NC}"
+    else
+        echo -e "${CYAN}CPU test completed${NC}"
+    fi
     echo
     
     # Memory performance test
@@ -446,11 +561,19 @@ run_performance_test() {
     
     # Disk I/O test (simple)
     echo -e "${BLUE}${BOLD}Disk I/O Test:${NC}"
-    local disk_test_start=$(date +%s.%N)
-    dd if=/dev/zero of=/tmp/test_file bs=1M count=10 2>/dev/null && rm -f /tmp/test_file
-    local disk_test_end=$(date +%s.%N)
-    local disk_duration=$(echo "$disk_test_end - $disk_test_start" | bc 2>/dev/null || echo "N/A")
-    echo -e "${CYAN}10MB write test: ${disk_duration}s${NC}"
+    local disk_test_start=$(date +%s.%N 2>/dev/null || date +%s)
+    if command -v dd &>/dev/null; then
+        dd if=/dev/zero of=/tmp/test_file bs=1M count=10 2>/dev/null && rm -f /tmp/test_file
+        local disk_test_end=$(date +%s.%N 2>/dev/null || date +%s)
+        if command -v bc &>/dev/null; then
+            local disk_duration=$(echo "$disk_test_end - $disk_test_start" | bc 2>/dev/null || echo "N/A")
+            echo -e "${CYAN}10MB write test: ${disk_duration}s${NC}"
+        else
+            echo -e "${CYAN}10MB write test completed${NC}"
+        fi
+    else
+        echo -e "${YELLOW}dd command not available for I/O test${NC}"
+    fi
     echo
     
     echo -e "${BLUE}${BOLD}Performance Test Complete${NC}"
@@ -512,7 +635,7 @@ generate_json_report() {
     
     cat > "$output_file" << EOF
 {
-    "timestamp": "$(date -Iseconds)",
+    "timestamp": "$(date -Iseconds 2>/dev/null || date)",
     "hostname": "$(hostname)",
     "system": {
         "os": "$(uname -srm)",
@@ -641,7 +764,7 @@ main_report() {
         echo -e "${BOLD}${CYAN}💻 CPU Information${NC}"
         echo -e "${BLUE}CPU Cores:${NC} $(get_cpu_count)"
         local cpu_usage=$(get_cpu_usage)
-        echo -e "${BLUE}CPU Usage:${NC} ${cpu_usage}"
+        echo -e "${BLUE}CPU Usage:${NC} ${cpu_usage}%"
         echo -e "${BLUE}CPU Temperature:${NC} $(get_cpu_temperature)"
         
         # Check CPU threshold
@@ -677,6 +800,7 @@ main_report() {
         fi
         
         if [ "$DETAILED_MODE" = true ]; then
+            echo
             check_disk_health
         fi
         echo
@@ -688,6 +812,7 @@ main_report() {
         echo -e "${BLUE}Primary IP:${NC} $(get_ip_info)"
         
         if [ "$DETAILED_MODE" = true ]; then
+            echo
             check_network_services
         fi
         echo
