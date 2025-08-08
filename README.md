@@ -18,8 +18,8 @@ A comprehensive, standalone bash script for monitoring and reporting server heal
 - **Performance Benchmarks**: CPU, memory, disk I/O performance tests
 - **Health Checker**: System health scoring with actionable recommendations
 - **Process Information**: Top CPU and memory consuming processes
-- **System Updates**: Check for available package updates across distributions
-- **Continuous Monitoring**: Real-time monitoring mode with auto-refresh
+- **System Updates**: Check for available package updates across distributions (apt, yum, dnf, pacman, zypper, apk)
+- **Continuous Monitoring**: Real-time monitoring mode with configurable refresh interval
 - **Multiple Export Formats**: TXT, JSON, HTML output formats
 - **Detailed Logging**: Comprehensive logging with timestamps
 - **Command Line Interface**: Rich CLI with multiple options
@@ -28,7 +28,9 @@ A comprehensive, standalone bash script for monitoring and reporting server heal
 - **Cross-platform**: Linux (all distributions) and macOS support
 - **Standalone**: No external dependencies or config files required
 - **Error Handling**: Robust error handling and graceful degradation
-- **Distribution Detection**: Automatic detection of package managers (apt, yum, dnf)
+- **Distribution Detection**: Automatic detection of package managers (apt, yum, dnf, pacman, zypper, apk)
+- **Environment Awareness**: Detects Docker, virtualization, WSL
+- **Exit Codes**: 0 OK, 1 warnings, 2 errors (for automation/CI)
 
 ## 📋 Requirements
 
@@ -131,9 +133,13 @@ The script is **completely self-contained** with embedded configuration. No exte
 | `--mem-threshold N` | Set memory alert threshold |
 | `--disk-threshold N` | Set disk alert threshold |
 | `--monitor` | Continuous monitoring mode |
+| `--interval N` | Interval in seconds for monitor mode |
+| `--no-color` | Disable colored output |
 | `--security-scan` | Run comprehensive security scan |
 | `--performance-test` | Run performance benchmarks |
 | `--health-check` | Run system health check |
+| `--services list` | Comma separated list of services to check |
+| `--version` | Show script version |
 
 ## 📈 Example Outputs
 
@@ -207,16 +213,19 @@ Total Errors: 0
 
 ### Quick Download & Run
 ```bash
-# Download and run directly
+# Download and run directly (recommended)
 curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/infoReport.sh -o infoReport.sh
 chmod +x infoReport.sh
 ./infoReport.sh
 
-# One-liner with basic report
+# One-liner with basic report (logs to current directory)
 bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/infoReport.sh)
 
 # One-liner with detailed report
 bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/infoReport.sh) --detailed
+
+# One-liner with no logging (cleanest output)
+bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/infoReport.sh) --no-log
 ```
 
 ### Git Installation
@@ -284,6 +293,12 @@ check_service your_custom_service
 
 4. **CPU Usage Shows 0%**: This is normal in containers or VMs with low load
 
+5. **Log File Errors with One-liner**: When using `bash <(curl ...)`, logs are written to current directory
+   ```bash
+   # To avoid log file issues, use --no-log or download first
+   bash <(curl -fsSL https://raw.githubusercontent.com/0xPacman/ServerInfoReport/main/infoReport.sh) --no-log
+   ```
+
 ## 📝 Logging
 
 Logs are written to `server_report.log` in the script directory. Log format:
@@ -311,9 +326,15 @@ MIT License - see LICENSE file for details
 
 ## 🔮 Roadmap
 
-### ✅ Current Features (v3.0)
+### ✅ Current Features (v3.1)
 - [x] **Standalone Design**: Single script, no external dependencies
 - [x] **Cross-Distribution Support**: Ubuntu, RHEL, CentOS, Fedora, openSUSE, Arch, Alpine
+- [x] **Additional Package Managers**: pacman, zypper, apk
+- [x] **Environment Detection**: Docker, virtualization, WSL
+- [x] **Configurable Monitor Interval & Services List**
+- [x] **Improved Security Checks**: SSH config, world-writable dirs, sudo failures
+- [x] **Log Rotation**: Basic 1MB rotation
+- [x] **Exit Codes**: 0/1/2 based on health
 - [x] **Multiple Export Formats**: JSON, HTML, TXT
 - [x] **Security Scanning**: Failed logins, port checks, firewall status  
 - [x] **Performance Testing**: CPU, memory, disk I/O benchmarks

@@ -1,11 +1,14 @@
 #!/bin/bash
 
 # Advanced Server Information Report Tool
-# Version: 3.0 - Standalone Edition
+# Version: 3.1 - Standalone Edition
 # Author: 0xPacman
 # License: MIT
 
-# Color definitions and formatting
+# Version variable (used by --version)
+VERSION="3.1"
+
+# Color definitions and formatting (can be disabled with --no-color or when not a TTY)
 NC="\033[0m"  
 RED="\033[0;31m"
 GREEN="\033[0;32m"
@@ -16,9 +19,16 @@ CYAN="\033[0;36m"
 BOLD="\033[1m"
 DIM="\033[2m"
 UNDERLINE="\033[4m"
+ENABLE_COLOR=true
 
 # Configuration variables (embedded in script - no external config file needed)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
+
+# Handle cases where script is run via curl/wget pipe (no real file path)
+if [[ "${BASH_SOURCE[0]}" == *"/proc/self/fd/"* ]] || [[ "${BASH_SOURCE[0]}" == "/dev/stdin" ]] || [[ ! -d "$SCRIPT_DIR" ]]; then
+    SCRIPT_DIR="$(pwd)"
+fi
+
 LOG_FILE="${SCRIPT_DIR}/server_report.log"
 ENABLE_LOGGING=true
 ENABLE_ALERTS=true
@@ -30,6 +40,9 @@ DETAILED_MODE=false
 QUIET_MODE=false
 EXPORT_FORMAT="txt"
 OUTPUT_FILE=""
+MONITOR_INTERVAL=30
+CUSTOM_SERVICES=""  # Comma separated list via --services
+FORCED_EXIT_CODE=0  # Will be computed based on warnings/errors
 
 # Global variables
 TOTAL_WARNINGS=0
@@ -37,12 +50,36 @@ TOTAL_ERRORS=0
 REPORT_START_TIME=$(date +%s)
 
 # Utility functions
+rotate_logs() {
+    # Simple log rotation if file >1MB
+    if [ -f "$LOG_FILE" ]; then
+        local size
+        size=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$size" -gt 1048576 ]; then
+            mv "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+            : > "$LOG_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
 log_message() {
     local message="$1"
     local level="${2:-INFO}"
     if [ "$ENABLE_LOGGING" = true ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" >> "$LOG_FILE"
+        # Ensure log directory writable; fallback to /tmp
+        if ! touch "$LOG_FILE" 2>/dev/null; then
+            LOG_FILE="/tmp/server_report.log"
+            touch "$LOG_FILE" 2>/dev/null || ENABLE_LOGGING=false
+        fi
+        rotate_logs
+        if [ "$ENABLE_LOGGING" = true ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" >> "$LOG_FILE"
+        fi
     fi
+}
+
+disable_colors() {
+    NC=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; BOLD=""; DIM=""; UNDERLINE=""; ENABLE_COLOR=false
 }
 
 show_help() {
@@ -64,9 +101,13 @@ ${UNDERLINE}Options:${NC}
     --mem-threshold N  Set memory alert threshold (default: 85%)
     --disk-threshold N Set disk alert threshold (default: 90%)
     --monitor          Run in continuous monitoring mode
+    --interval N       Interval seconds for --monitor (default 30)
+    --no-color         Disable colored output
     --security-scan    Run comprehensive security scan
     --performance-test Run performance benchmarks
     --health-check     Run system health check
+    --services list    Comma separated service names for health checks
+    --version          Show version and exit
 
 ${UNDERLINE}Examples:${NC}
     $(basename "$0") -d -o report.html -f html
@@ -114,6 +155,10 @@ parse_cpu_percentage() {
     echo "$cpu_string" | grep -oE '[0-9]+\.?[0-9]*' | head -1
 }
 
+extract_number() { # generic helper
+    echo "$1" | grep -oE '[0-9]+' | head -1
+}
+
 get_os() {
     case "$(uname -s)" in
         Linux*)   echo "Linux" ;;
@@ -129,24 +174,30 @@ draw_line() {
 get_cpu_usage() {
     local os=$(get_os)
     if [ "$os" == "Linux" ]; then
-        # Multiple methods to get CPU usage
-        if command -v top &>/dev/null; then
-            local cpu_output=$(top -bn1 | grep "Cpu(s)" | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9.]+%/) print $i}' | head -1 | sed 's/%//')
-            if [ -n "$cpu_output" ] && [ "$cpu_output" != "" ]; then
-                echo "$cpu_output"
-            else
-                echo "0.0"
+        if [ -r /proc/stat ]; then
+            local cpu1 idle1 total1 cpu2 idle2 total2
+            read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
+            idle1=$idle; total1=$((user+nice+system+idle+iowait+irq+softirq+steal))
+            sleep 0.5
+            read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
+            idle2=$idle; total2=$((user+nice+system+idle+iowait+irq+softirq+steal))
+            local diff_idle=$((idle2-idle1))
+            local diff_total=$((total2-total1))
+            if [ "$diff_total" -gt 0 ]; then
+                local usage=$(echo "scale=1; (1-($diff_idle/$diff_total))*100" | bc -l 2>/dev/null || echo 0)
+                echo "$usage"
+                return
             fi
-        elif [ -f /proc/stat ]; then
-            # Calculate CPU usage from /proc/stat
-            local cpu_line=$(head -1 /proc/stat)
-            local cpu_sum=$(echo "$cpu_line" | awk '{sum=$2+$3+$4+$5+$6+$7+$8; printf "%.1f", (sum-$5)*100/sum}')
-            echo "$cpu_sum"
+        fi
+        # fallback
+        if command -v top &>/dev/null; then
+            local cpu_output=$(top -bn1 | grep "Cpu(s)" | awk '{for(i=1;i<=NF;i++) if($i ~ /id,/) id=$i} END {gsub(/id,/,"",id); if(id!="") printf "%.1f", 100-id;}' )
+            echo "${cpu_output:-0.0}"
         else
             echo "0.0"
         fi
     elif [ "$os" == "Mac" ]; then
-        local mac_cpu=$(top -l 1 | grep "CPU usage" | awk '{print $3}' | sed 's/%//' 2>/dev/null)
+        local mac_cpu=$(top -l 1 | grep "CPU usage" | awk -F'idle' '{print $1}' | awk '{print $3}' | sed 's/%//' 2>/dev/null)
         echo "${mac_cpu:-0.0}"
     else
         echo "0.0"
@@ -190,6 +241,44 @@ get_storage_usage() {
     else
         echo "Storage info not available"
     fi
+}
+
+detect_environment() {
+    local envs=()
+    # Container / Docker
+    if [ -f /.dockerenv ] || grep -qa 'docker' /proc/1/cgroup 2>/dev/null; then
+        envs+=("Docker")
+    fi
+    # WSL
+    if grep -qi 'microsoft' /proc/version 2>/dev/null; then
+        envs+=("WSL")
+    fi
+    # Virtualization
+    if command -v systemd-detect-virt &>/dev/null; then
+        local virt=$(systemd-detect-virt 2>/dev/null)
+        if [ -n "$virt" ] && [ "$virt" != "none" ]; then
+            envs+=("Virt:$virt")
+        fi
+    fi
+    if [ ${#envs[@]} -eq 0 ]; then
+        echo "BareMetal"
+    else
+        IFS=','; echo "${envs[*]}"; unset IFS
+    fi
+}
+
+escape_json() {
+    # Escape backslashes, quotes, and newlines
+    echo "$1" | sed 's/\\/\\\\/g; s/\"/\\\"/g; s/\n/\\n/g'
+}
+
+html_safe() {
+    local s="$1"
+    s=${s//&/&amp;}
+    s=${s//</&lt;}
+    s=${s//>/&gt;}
+    s=${s//\"/&quot;}
+    echo "$s"
 }
 
 get_uptime_info() {
@@ -424,6 +513,22 @@ check_security_status() {
             fi
         fi
         
+        # SSH config hardening (basic)
+        if [ -f /etc/ssh/sshd_config ]; then
+            local permit_root=$(grep -Ei '^[# ]*PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | tail -1 | awk '{print tolower($2)}')
+            if [ "$permit_root" = "yes" ]; then
+                echo -e "${YELLOW}⚠️  SSH permits root login${NC}"; ((TOTAL_WARNINGS++))
+            else
+                echo -e "${GREEN}✓ SSH root login disabled${NC}"
+            fi
+            local pass_auth=$(grep -Ei '^[# ]*PasswordAuthentication' /etc/ssh/sshd_config 2>/dev/null | tail -1 | awk '{print tolower($2)}')
+            if [ "$pass_auth" = "yes" ]; then
+                echo -e "${YELLOW}⚠️  SSH password auth enabled${NC}"; ((TOTAL_WARNINGS++))
+            else
+                echo -e "${GREEN}✓ SSH password auth disabled${NC}"
+            fi
+        fi
+
         # Check open ports
         if command -v ss &>/dev/null; then
             local open_ports=$(ss -tuln | grep LISTEN | wc -l 2>/dev/null || echo "0")
@@ -433,6 +538,27 @@ check_security_status() {
             local open_ports=$(netstat -tuln 2>/dev/null | grep LISTEN | wc -l 2>/dev/null || echo "0")
             open_ports=$(echo "$open_ports" | tr -d '\n' | awk '{print $1}')
             echo -e "${CYAN}Open listening ports: ${open_ports:-0}${NC}"
+        fi
+
+        # World-writable directories under /
+        local ww_count=$(find / -xdev -type d -perm -0002 2>/dev/null | grep -v "/proc" | head -100 | wc -l 2>/dev/null || echo 0)
+        if [ "$ww_count" -gt 0 ]; then
+            echo -e "${YELLOW}⚠️  World-writable dirs (top 100 scanned): $ww_count${NC}"; ((TOTAL_WARNINGS++))
+        else
+            echo -e "${GREEN}✓ No world-writable dirs (scanned)${NC}"
+        fi
+
+        # Sudo failures (last 24h)
+        if command -v journalctl &>/dev/null; then
+            local sudo_fails_raw
+            sudo_fails_raw=$(journalctl _COMM=sudo --since "24 hours ago" 2>/dev/null | grep -ci 'authentication failure' || echo 0)
+            local sudo_fails=$(echo "$sudo_fails_raw" | tr -cd '0-9' )
+            [ -z "$sudo_fails" ] && sudo_fails=0
+            if [ "$sudo_fails" -gt 0 ] 2>/dev/null; then
+                echo -e "${YELLOW}⚠️  Sudo authentication failures: $sudo_fails${NC}"; ((TOTAL_WARNINGS++))
+            else
+                echo -e "${GREEN}✓ No sudo authentication failures${NC}"
+            fi
         fi
     fi
 }
@@ -467,6 +593,15 @@ check_system_updates() {
             else
                 echo -e "${GREEN}System is up to date${NC}"
             fi
+        elif command -v pacman &>/dev/null; then
+            local updates=$(pacman -Sup 2>/dev/null | grep -c ".pkg.tar" || echo 0)
+            if [ "$updates" -gt 0 ]; then echo -e "${YELLOW}Available updates: $updates${NC}"; else echo -e "${GREEN}System is up to date${NC}"; fi
+        elif command -v zypper &>/dev/null; then
+            local updates=$(zypper list-updates 2>/dev/null | grep -c '^v ' || echo 0)
+            if [ "$updates" -gt 0 ]; then echo -e "${YELLOW}Available updates: $updates${NC}"; else echo -e "${GREEN}System is up to date${NC}"; fi
+        elif command -v apk &>/dev/null; then
+            local updates=$(apk version -l '<' 2>/dev/null | grep -c '<' || echo 0)
+            if [ "$updates" -gt 0 ]; then echo -e "${YELLOW}Available updates: $updates${NC}"; else echo -e "${GREEN}System is up to date${NC}"; fi
         else
             echo -e "${YELLOW}Package manager not found${NC}"
         fi
@@ -563,11 +698,13 @@ run_performance_test() {
     echo -e "${BLUE}${BOLD}Disk I/O Test:${NC}"
     local disk_test_start=$(date +%s.%N 2>/dev/null || date +%s)
     if command -v dd &>/dev/null; then
-        dd if=/dev/zero of=/tmp/test_file bs=1M count=10 2>/dev/null && rm -f /tmp/test_file
+        local dd_output
+        dd_output=$( (dd if=/dev/zero of=/tmp/test_file bs=1M count=10 conv=fdatasync 2>&1) ); rm -f /tmp/test_file 2>/dev/null || true
         local disk_test_end=$(date +%s.%N 2>/dev/null || date +%s)
         if command -v bc &>/dev/null; then
             local disk_duration=$(echo "$disk_test_end - $disk_test_start" | bc 2>/dev/null || echo "N/A")
-            echo -e "${CYAN}10MB write test: ${disk_duration}s${NC}"
+            local speed=$(echo "$dd_output" | grep -Eo '[0-9.]+ MB/s' | tail -1)
+            echo -e "${CYAN}10MB write test: ${disk_duration}s ${speed:+| Speed: $speed}${NC}"
         else
             echo -e "${CYAN}10MB write test completed${NC}"
         fi
@@ -632,36 +769,45 @@ generate_json_report() {
     local cpu_usage=$(parse_cpu_percentage "$(get_cpu_usage)")
     local mem_percentage=$(get_memory_percentage)
     local disk_percentage=$(get_disk_percentage)
-    
-    cat > "$output_file" << EOF
+        local mem_details="$(escape_json "$(get_memory_usage)")"
+        local storage_details="$(escape_json "$(get_storage_usage | tail -1)")"
+        local uptime="$(escape_json "$(get_uptime_info)")"
+        local loadavg="$(escape_json "$(get_load_average)")"
+        local envdet="$(escape_json "$(detect_environment)")"
+        local ipaddr="$(escape_json "$(get_ip_info)")"
+        local cputemp="$(escape_json "$(get_cpu_temperature)")"
+
+        cat > "$output_file" << EOF
 {
     "timestamp": "$(date -Iseconds 2>/dev/null || date)",
     "hostname": "$(hostname)",
+    "environment": "$envdet",
     "system": {
         "os": "$(uname -srm)",
-        "uptime": "$(get_uptime_info)",
-        "load_average": "$(get_load_average)"
+        "uptime": "$uptime",
+        "load_average": "$loadavg"
     },
     "cpu": {
         "cores": $(get_cpu_count),
         "usage_percent": $cpu_usage,
-        "temperature": "$(get_cpu_temperature)"
+        "temperature": "$cputemp"
     },
     "memory": {
         "usage_percent": $mem_percentage,
-        "details": "$(get_memory_usage)"
+        "details": "$mem_details"
     },
     "storage": {
         "root_usage_percent": $disk_percentage,
-        "details": "$(get_storage_usage | tail -1)"
+        "details": "$storage_details"
     },
     "network": {
-        "primary_ip": "$(get_ip_info)"
+        "primary_ip": "$ipaddr"
     },
     "alerts": {
         "warnings": $TOTAL_WARNINGS,
         "errors": $TOTAL_ERRORS
-    }
+    },
+    "summary": "status=$([ "$TOTAL_ERRORS" -gt 0 ] && echo ERROR || ( [ "$TOTAL_WARNINGS" -gt 0 ] && echo WARN || echo OK ));warnings=$TOTAL_WARNINGS;errors=$TOTAL_ERRORS"
 }
 EOF
 }
@@ -671,6 +817,9 @@ generate_html_report() {
     local cpu_usage=$(parse_cpu_percentage "$(get_cpu_usage)")
     local mem_percentage=$(get_memory_percentage)
     local disk_percentage=$(get_disk_percentage)
+    local status_class
+    if [ "$TOTAL_ERRORS" -gt 0 ]; then status_class="error"; elif [ "$TOTAL_WARNINGS" -gt 0 ]; then status_class="warning"; else status_class="success"; fi
+    local envdet="$(html_safe "$(detect_environment)")"
     
     cat > "$output_file" << EOF
 <!DOCTYPE html>
@@ -690,9 +839,10 @@ generate_html_report() {
 <body>
     <div class="header">
         <h1>Server Information Report</h1>
-        <p><strong>Hostname:</strong> $(hostname)</p>
-        <p><strong>Generated:</strong> $(date)</p>
-        <p><strong>OS:</strong> $(uname -srm)</p>
+    <p><strong>Hostname:</strong> $(html_safe "$(hostname)")</p>
+    <p><strong>Generated:</strong> $(html_safe "$(date)")</p>
+    <p><strong>OS:</strong> $(html_safe "$(uname -srm)")</p>
+    <p><strong>Environment:</strong> $envdet</p>
     </div>
     
     <div class="section">
@@ -707,21 +857,18 @@ generate_html_report() {
             <strong>Disk Usage:</strong> ${disk_percentage}% (${ALERT_THRESHOLD_DISK}% threshold)
         </div>
         <div class="metric">
-            <strong>Load Average:</strong> $(get_load_average)
+            <strong>Load Average:</strong> $(html_safe "$(get_load_average)")
         </div>
         <div class="metric">
-            <strong>Uptime:</strong> $(get_uptime_info)
+            <strong>Uptime:</strong> $(html_safe "$(get_uptime_info)")
         </div>
     </div>
     
     <div class="section">
         <h2>Alert Summary</h2>
-        <div class="metric">
-            <strong>Warnings:</strong> $TOTAL_WARNINGS
-        </div>
-        <div class="metric">
-            <strong>Errors:</strong> $TOTAL_ERRORS
-        </div>
+        <div class="metric $status_class"><strong>Status:</strong> $([ "$TOTAL_ERRORS" -gt 0 ] && echo ERROR || ( [ "$TOTAL_WARNINGS" -gt 0 ] && echo WARN || echo OK ))</div>
+        <div class="metric"><strong>Warnings:</strong> $TOTAL_WARNINGS</div>
+        <div class="metric"><strong>Errors:</strong> $TOTAL_ERRORS</div>
     </div>
 </body>
 </html>
@@ -729,14 +876,15 @@ EOF
 }
 
 monitoring_mode() {
-    echo -e "${MAGENTA}${BOLD}Starting continuous monitoring mode...${NC}"
+    echo -e "${MAGENTA}${BOLD}Starting continuous monitoring mode (interval: ${MONITOR_INTERVAL}s)...${NC}"
     echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
     
     while true; do
+        TOTAL_WARNINGS=0; TOTAL_ERRORS=0; REPORT_START_TIME=$(date +%s)
         clear
         main_report
-        echo -e "\n${DIM}Refreshing in 30 seconds...${NC}"
-        sleep 30
+        echo -e "\n${DIM}Refreshing in ${MONITOR_INTERVAL} seconds...${NC}"
+        sleep "$MONITOR_INTERVAL"
     done
 }
 
@@ -754,6 +902,7 @@ main_report() {
         echo -e "${BOLD}${CYAN}📊 System Information${NC}"
         echo -e "${BLUE}Hostname:${NC} $(hostname)"
         echo -e "${BLUE}OS:${NC} $(uname -srm)"
+        echo -e "${BLUE}Environment:${NC} $(detect_environment)"
         echo -e "${BLUE}Uptime:${NC} $(get_uptime_info)"
         echo -e "${BLUE}Load Average:${NC} $(get_load_average)"
         echo
@@ -821,8 +970,15 @@ main_report() {
     # Services Check
     if [ "$DETAILED_MODE" = true ] && [ "$QUIET_MODE" = false ]; then
         echo -e "${BOLD}${CYAN}🔧 Services Status${NC}"
-        check_service ssh
-        check_service cron
+        if [ -n "$CUSTOM_SERVICES" ]; then
+            IFS=',' read -r -a svc_array <<< "$CUSTOM_SERVICES"
+            for svc in "${svc_array[@]}"; do
+                [ -n "$svc" ] && check_service "$svc"
+            done
+        else
+            check_service ssh
+            check_service cron
+        fi
         check_docker_containers
         echo
     fi
@@ -909,9 +1065,13 @@ parse_arguments() {
                 shift 2
                 ;;
             --monitor)
-                monitoring_mode
-                exit 0
+                MONITOR_MODE_REQUESTED=true
+                shift
                 ;;
+            --interval)
+                MONITOR_INTERVAL="$2"; shift 2 ;;
+            --no-color)
+                disable_colors; shift ;;
             --security-scan)
                 run_security_scan
                 exit 0
@@ -924,6 +1084,10 @@ parse_arguments() {
                 run_health_check
                 exit 0
                 ;;
+            --services)
+                CUSTOM_SERVICES="$2"; shift 2 ;;
+            --version)
+                echo "infoReport version $VERSION"; exit 0 ;;
             *)
                 echo "Unknown option: $1"
                 show_help
@@ -935,13 +1099,19 @@ parse_arguments() {
 
 # Main execution function
 main() {
-    # Parse command line arguments
+    # Auto-disable colors if not a TTY
+    if [ ! -t 1 ]; then disable_colors; fi
+
     parse_arguments "$@"
-    
-    # Run main report
+
+    if [ "$MONITOR_MODE_REQUESTED" = true ]; then
+        monitoring_mode
+        exit 0
+    fi
+
     main_report
-    
-    # Export if requested
+
+    # Export if requested (use quiet to avoid duplication for txt)
     if [ "$ENABLE_EXPORT" = true ] && [ -n "$OUTPUT_FILE" ]; then
         case "${EXPORT_FORMAT:-txt}" in
             json)
@@ -949,7 +1119,7 @@ main() {
                 echo -e "${GREEN}Report exported to: $OUTPUT_FILE (JSON format)${NC}"
                 ;;
             txt)
-                main_report > "$OUTPUT_FILE" 2>&1
+                QUIET_MODE=true main_report > "$OUTPUT_FILE" 2>&1
                 echo -e "${GREEN}Report exported to: $OUTPUT_FILE (TXT format)${NC}"
                 ;;
             html)
@@ -961,6 +1131,15 @@ main() {
                 exit 1
                 ;;
         esac
+    fi
+
+    # Exit code semantics: 0 ok, 1 warnings only, 2 errors (or warnings+errors)
+    if [ "$TOTAL_ERRORS" -gt 0 ]; then
+        exit 2
+    elif [ "$TOTAL_WARNINGS" -gt 0 ]; then
+        exit 1
+    else
+        exit 0
     fi
 }
 
