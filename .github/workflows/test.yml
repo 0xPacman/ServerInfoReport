@@ -1,0 +1,41 @@
+name: Linux compatibility
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n infoReport.sh && shellcheck infoReport.sh
+
+  distributions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            install: apt-get update -qq && apt-get install -y bash gawk coreutils python3
+          - image: debian:stable-slim
+            install: apt-get update -qq && apt-get install -y bash gawk coreutils python3
+          - image: fedora:latest
+            install: dnf install -y bash gawk coreutils python3
+          - image: alpine:latest
+            install: apk add --no-cache bash python3
+          - image: archlinux:latest
+            install: pacman -Syu --noconfirm bash gawk coreutils python
+          - image: opensuse/leap:latest
+            install: zypper --non-interactive install bash gawk coreutils python3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test inside distribution (including real pseudo-terminal)
+        env:
+          IMAGE: ${{ matrix.image }}
+          INSTALL: ${{ matrix.install }}
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work "$IMAGE"
+          sh -c "$INSTALL && bash -n infoReport.sh && python3 -m unittest discover -s tests -v"
